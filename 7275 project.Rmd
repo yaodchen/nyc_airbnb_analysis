@@ -1,0 +1,376 @@
+---
+title: "7275 final case project"
+output: word_document
+author: "Yaodong Chen and Yuxiao Ma"
+---
+
+```{r}
+library(tidyverse)
+library(e1071)
+library(class)
+library(sampling)
+library(class)
+library(ggthemes)
+library(GGally)
+library(ggExtra)
+library(caret)
+library(glmnet)
+library(corrplot)
+library(leaflet)
+library(kableExtra)
+library(RColorBrewer)
+library(plotly)
+library(gmodels)
+library(kknn)
+
+# read data
+airbnb <- read.csv("C:/Users/Yaodong/Desktop/NYC.csv", header = TRUE, na.strings=c("","NA"))
+
+th <- theme_fivethirtyeight() + theme(axis.title = element_text(), axis.title.x = element_text()) # global theme for ggplot2 objects
+set.seed(252)
+
+#Data selection
+airbnb$id  <- as.factor(airbnb$id)
+airbnb$host_id  <- as.factor(airbnb$host_id)
+head(airbnb) %>% kable() %>% kable_styling()
+names_to_delete <- c("id", "host_id")
+airbnb[names_to_delete] <- NULL
+apply(airbnb,2,function(x) sum(is.na(x)))
+apply(airbnb,2,function(x) sum(x==''))
+sapply(airbnb, function(x) sum(is.na(x)))
+head(airbnb) %>% kable() %>% kable_styling()
+names_to_delete <- c("id", "host_id")
+airbnb[names_to_delete] <- NULL
+
+```
+
+
+```{r}
+#missing data boxplot
+missing_airbnb <- airbnb %>% summarise_all(~(sum(is.na(.))/n()))
+missing_airbnb <- gather(missing_airbnb, key = "variables", value = "percent_missing")
+missing_airbnb <- missing_airbnb[missing_airbnb$percent_missing > 0.0, ] 
+ggplot(missing_airbnb, aes(x = reorder(variables, percent_missing), y = percent_missing)) +
+  geom_bar(stat = "identity", fill = "grey", aes(color = I('white')), size = 0.3)+
+  xlab('variables')+
+  coord_flip() + 
+  th  +
+  ggtitle("Missing Data") +
+  xlab("Column name") +
+  ylab("Percentage missing") +
+  annotate("text", x = 1.5, y = 0.1,label = "host_name and name have less than 0.001\n percentage missing", color = "slateblue", size = 5)
+```
+
+```{r}
+#price distribution
+airbnb$price<- as.numeric(as.character(airbnb$price))
+airbnb$minimum_nights<- as.numeric(as.character(airbnb$minimum_nights))
+airbnb$number_of_reviews<- as.numeric(as.character(airbnb$number_of_reviews))
+airbnb$reviews_per_month<- as.numeric(as.character(airbnb$reviews_per_month))
+airbnb$calculated_host_listings_count<- as.numeric(as.character(airbnb$calculated_host_listings_count))
+airbnb$availability_365<- as.numeric(as.character(airbnb$availability_365))
+ggplot(airbnb, aes(price)) +
+  geom_histogram(bins = 30, aes(y = ..density..), fill = "purple") + 
+  geom_density(alpha = 0.2, fill = "purple") +
+  th +
+  ggtitle("Distribution of price",
+          subtitle = "The distribution is very skewed") +
+  theme(axis.title = element_text(), axis.title.x = element_text()) +
+  geom_vline(xintercept = round(mean(airbnb$price,na.rm=TRUE), 2), size = 2, linetype = 3)
+
+ggplot(airbnb, aes(price)) +
+  geom_density(alpha = 0.2, fill = "purple") +
+  th +
+  ggtitle("Transformed distribution of price",
+          subtitle = expression("With" ~'log'[10] ~ "transformation of x-axis")) +
+  geom_vline(xintercept = round(mean(airbnb$price,na.rm=TRUE), 2), size = 2, linetype = 3) +
+  scale_x_log10() +
+  annotate("text", x = 1800, y = 0.75,label = paste("Mean price = ", paste0(round(mean(airbnb$price,na.rm=TRUE), 2), "$")),
+            size = 8)
+```
+
+
+
+
+```{r}
+#boxplot
+ty_airbnb<-filter(airbnb, room_type == "Entire home/apt"|room_type == "Private room"|room_type == "Shared room")
+ggplot(ty_airbnb, aes(x=as.factor(neighbourhood_group), y=(..count..)*100/sum(..count..) )) +geom_bar( fill="brown" )
+
+airbnb$room_type<-as.factor(airbnb$room_type)
+ggplot(ty_airbnb, aes(x = room_type, y = price)) +
+  geom_boxplot(aes(fill = room_type)) + scale_y_log10() +
+  th + 
+  xlab("Room type") + 
+  ylab("Price") +
+  ggtitle("Boxplots of price by room type",
+          subtitle = "Entire homes and apartments have the highest avg price") +
+  geom_hline(yintercept = mean(airbnb$price), color = "purple", linetype = 2)
+```
+
+```{r}
+#correlation matrix between attributes
+airbnb_cor <- ty_airbnb[, sapply(ty_airbnb, is.numeric)]
+airbnb_cor <- airbnb_cor[complete.cases(airbnb_cor), ]
+correlation_matrix <- cor(airbnb_cor, method = "spearman")
+corrplot(correlation_matrix, method = "color")
+```
+
+```{r}
+#data processing
+new.airbnb<-filter(ty_airbnb,price>10)
+new.airbnb[is.na(new.airbnb)]<-0
+new.airbnb$`price` <- ifelse(new.airbnb$`price` >=145, 1, 0)
+
+
+new.airbnb$room_type<-str_replace(new.airbnb$room_type,'Private room','1')
+new.airbnb$room_type<-str_replace(new.airbnb$room_type,'Entire home/apt','2')
+new.airbnb$room_type<-str_replace(new.airbnb$room_type,'Shared room','3')
+
+
+new.airbnb$neighbourhood_group<-str_replace(new.airbnb$neighbourhood_group,'Brooklyn','1')
+new.airbnb$neighbourhood_group<-str_replace(new.airbnb$neighbourhood_group,'Manhattan','2')
+new.airbnb$neighbourhood_group<-str_replace(new.airbnb$neighbourhood_group,'Queens','3')
+new.airbnb$neighbourhood_group<-str_replace(new.airbnb$neighbourhood_group,'Staten Island','4')
+new.airbnb$neighbourhood_group<-str_replace(new.airbnb$neighbourhood_group,'Bronx','5')
+
+new.airbnb$price<-as.numeric(new.airbnb$price)
+new.airbnb<-new.airbnb[,-c(1,2,4,5,6,11)]
+
+```
+
+```{r}
+# Naive Bayes model prediction
+train.index<-sample(c(1:dim(new.airbnb)[1]), dim(new.airbnb)[1]*0.6)
+train.df<-new.airbnb[train.index,] 
+valid.df<-new.airbnb[-train.index,] 
+
+
+nb_model<-naiveBayes(as.factor(price)~., data = train.df) 
+pred<-predict(nb_model,valid.df)
+CrossTable(x = pred, y = valid.df$price, prop.chisq = FALSE) 
+Accuracy=(9504+2660)/16594
+Accuracy
+RMSE <- function(error) { sqrt(mean(error^2)) }
+RMSE(pred)
+```
+
+
+```{r}
+# KNN model prediction, we split the dataset into 60% training, and 40% validation set. 
+
+library(caret)
+library(gmodels)
+set.seed(2)
+
+train.index <- sample(c(1:dim(new.airbnb)[1]), dim(new.airbnb)[1]*0.6) 
+train.df <- new.airbnb[train.index, ]
+valid.df <- new.airbnb[-train.index, ]
+
+# standardize
+standardize <- function(x){
+  return ((x-mean(x))/sd(x))
+}
+
+
+train.response <- train.df$price
+valid.response <- valid.df$price
+
+train <- model.matrix(~neighbourhood_group+room_type+minimum_nights+number_of_reviews+reviews_per_month+calculated_host_listings_count,
+                      data = train.df)
+valid <- model.matrix(~neighbourhood_group+room_type+minimum_nights+number_of_reviews+reviews_per_month+calculated_host_listings_count,
+                      data = valid.df)
+
+train.air <- as.data.frame(train)
+valid.air <- as.data.frame(valid)
+
+# choice of K
+knn.1 <- knn(train, valid, train.response, k=1)
+knn.2 <- knn(train, valid, train.response, k=2)
+knn.3 <- knn(train, valid, train.response, k=3)
+knn.4 <- knn(train, valid, train.response, k=4)
+knn.5 <- knn(train, valid, train.response, k=5)
+knn.6 <- knn(train, valid, train.response, k=6)
+knn.7 <- knn(train, valid, train.response, k=7)
+knn.8 <- knn(train, valid, train.response, k=8)
+knn.9 <- knn(train, valid, train.response, k=9)
+knn.10 <- knn(train, valid, train.response, k=10)
+
+confusionMatrix(table(knn.1, valid.response))
+confusionMatrix(table(knn.2, valid.response))
+confusionMatrix(table(knn.3, valid.response))
+confusionMatrix(table(knn.4, valid.response))
+confusionMatrix(table(knn.5, valid.response))
+confusionMatrix(table(knn.6, valid.response))
+confusionMatrix(table(knn.7, valid.response))
+confusionMatrix(table(knn.8, valid.response))
+confusionMatrix(table(knn.9, valid.response))
+confusionMatrix(table(knn.10, valid.response))
+
+
+# alternate approach
+accuracy.df <- data.frame(k=seq(1,10,1), accuracy = rep(0,10))
+for (i in 1:10){
+  knn.pred <- knn(train = train, test = valid, cl=train.df[, 3] ,k=i)
+  accuracy.df[i,2] <- confusionMatrix(knn.pred, as.factor(valid.df$price))$overall[1]
+}
+accuracy.df
+
+# classification matrix
+test.pred = knn(train = train, test = valid, cl=train.df[, 3] ,k=9)
+CrossTable(x=valid.df$price, y=test.pred, prop.chisq = FALSE)
+
+
+# RMSE
+rmse <- function(error){sqrt(mean(error^2))}
+rmse(as.numeric(test.pred))
+```
+
+
+```{r}
+# Linear Regression model prediction
+train.index<-sample(c(1:dim(new.airbnb)[1]), dim(new.airbnb)[1]*0.6)
+train.df<-new.airbnb[train.index,] 
+valid.df<-new.airbnb[-train.index,]
+lm_model <- train(price ~.  , data = train.df, method = "lm")
+summary(lm_model)
+
+prediction<-predict(lm_model,valid.df)
+rmse <- function(error) { sqrt(mean(error^2)) }
+rmse(prediction)
+```
+
+
+```{r}
+# regression tree
+library(readxl)
+library(class)
+library(rpart)
+library(rpart.plot)
+library(forecast)
+
+# read data
+airbnb <- read.csv("C:/Users/Yaodong/Desktop/NYC.csv", header = TRUE, na.strings=c("","NA"))
+
+# Split the data into train 60%, valid 20%, and test dataset 20%
+train <- airbnb[1:29337,]
+valid <- airbnb[29338:39117,]
+test <- airbnb[39118:48895,]
+
+# Construct the regression tree
+airbnb.plot <- rpart(price~neighbourhood_group+room_type+minimum_nights+number_of_reviews+reviews_per_month+calculated_host_listings_count+availability_365, data = train, method = "anova",cp=0.001)
+prp(airbnb.plot, type=1, tweak = 2.2, main="Regression Tree")
+
+# Check importance
+t(t(airbnb.plot$variable.importance))
+
+
+train.data <- train[,c("neighbourhood_group","room_type","minimum_nights","number_of_reviews","reviews_per_month","calculated_host_listings_count","availability_365", "price")]
+valid.data <- valid[,c("neighbourhood_group","room_type","minimum_nights","number_of_reviews","reviews_per_month","calculated_host_listings_count","availability_365","price")]
+test.data <- test[,c("neighbourhood_group","room_type","minimum_nights","number_of_reviews","reviews_per_month","calculated_host_listings_count","availability_365","price")]
+
+
+# Return the optimal cp value associated with the minimum error
+best.pred <- airbnb$cptable[which.min(airbnb$cptable[,"xerror"]),"CP"]
+tree.prune <- prune(airbnb.plot, cp=best.pred)
+tree.prune
+
+# Prediction
+train.pred <- predict(tree.prune, train.data)
+valid.pred <- predict(tree.prune, valid.data)
+test.pred <- predict(tree.prune, test.data)
+
+# Compute the accuracy
+accuracy(train.pred, train$price)
+accuracy(valid.pred, valid$price)
+accuracy(test.pred, test$price)
+
+# Compute the Root Mean Square Error
+rmse <- function(error){sqrt(mean(error^2))}
+train.error <- (train.pred-train$Price)
+valid.error <- (valid.pred-valid$Price)
+test.error <- (test.pred-test$Price)
+
+rmse(train.error)
+rmse(valid.error)
+rmse(test.error)
+```
+
+
+```{r}
+# Neural network
+library(dummies)
+library(neuralnet)
+library(tidyverse)
+airbnb <- read.csv("C:/Users/Yaodong/Desktop/NYC.csv", header = TRUE, na.strings=c("","NA"))
+airbnb <- airbnb[,c(5,9,10,11,12,14,15,16)]
+airbnb$room_type<-str_replace(airbnb$room_type,'Private room','1')
+airbnb$room_type<-str_replace(airbnb$room_type,'Entire home/apt','2')
+airbnb$room_type<-str_replace(airbnb$room_type,'Shared room','3')
+
+airbnb$neighbourhood_group<-str_replace(airbnb$neighbourhood_group,'Brooklyn','1')
+airbnb$neighbourhood_group<-str_replace(airbnb$neighbourhood_group,'Manhattan','2')
+airbnb$neighbourhood_group<-str_replace(airbnb$neighbourhood_group,'Queens','3')
+airbnb$neighbourhood_group<-str_replace(airbnb$neighbourhood_group,'Staten Island','4')
+airbnb$neighbourhood_group<-str_replace(airbnb$neighbourhood_group,'Bronx','5')
+
+airbnb$neighbourhood_group<-as.integer(factor(airbnb$neighbourhood_group))
+airbnb$room_type<-as.integer(factor(airbnb$room_type))
+airbnb$reviews_per_month<-as.integer(factor(airbnb$reviews_per_month))
+airbnb$price<-as.integer(factor(airbnb$price))
+airbnb$minimum_nights<-as.integer(factor(airbnb$minimum_nights))
+airbnb$number_of_reviews<-as.integer(factor(airbnb$number_of_reviews))
+airbnb$calculated_host_listings_count<-as.integer(factor(airbnb$calculated_host_listings_count))
+airbnb$availability_365<-as.integer(factor(airbnb$availability_365))
+airbnb.final <- na.omit(airbnb)
+airbnb.final <- as.data.frame(lapply(airbnb.final, normalized.data))
+
+set.seed(20)
+
+normalized.data <- function(a){return((a-mean(a))/(max(a)-min(a)))
+}
+rmse <- function(b){return(sqrt(mean(b^2)))}
+
+train.data <- sample(row.names(airbnb.final), 0.5*dim(airbnb.final)[1])
+valid.data <- setdiff(row.names(airbnb.final), train.data)
+train.df <- airbnb.final[train.data,]
+valid.df <- airbnb.final[valid.data,]
+
+
+t.name <- names(airbnb.final)
+t.formula <- as.formula(paste("price~",
+                              paste(t.name[!t.name%in%"price"],
+                                    collapse="+")))
+
+
+t.th.1 <- neuralnet(t.formula, data = train.df, threshold = 1, hidden = 1, algorithm = "rprop+", stepmax = 1e+08)
+t.th.0.5 <- neuralnet(t.formula, data = train.df, threshold = 0.5, hidden = 1, algorithm = "rprop+", stepmax = 1e+08)
+t.th.0.1 <- neuralnet(t.formula, data = train.df, threshold = 0.1, hidden = 1, algorithm = "rprop+",stepmax = 1e+08)
+
+th.1.pred <- neuralnet::compute(t.th.1, valid.df[,-1])
+th.0.5.pred <- neuralnet::compute(t.th.0.5, valid.df[,-1])
+th.0.1.pred <- neuralnet::compute(t.th.0.1, valid.df[,-1])
+
+error.th.1 <- th.1.pred$net.result-train.df$price
+error.th.0.5 <- th.0.5.pred$net.result-train.df$price
+error.th.0.1 <- th.0.1.pred$net.result-train.df$price
+
+options(digits = 12)
+rmse(error.th.1)
+rmse(error.th.0.5)
+rmse(error.th.0.1)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
